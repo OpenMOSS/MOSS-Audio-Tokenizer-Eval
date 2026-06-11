@@ -14,6 +14,7 @@ CLI. Legacy or system-dependent metrics can still be added as optional adapters.
   - `OpenMOSS-Team/MOSS-Audio-Tokenizer-v2`
   - `OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano`
 - RVQ evaluation with arbitrary layers: `1`, `1,2,4,8`, `1..32`, or `all`.
+- Multi-node/multi-GPU reconstruction through deterministic data sharding.
 - Extensible adapter interface for other tokenizers, codecs, VAEs, and vocoders.
 - Stable output contract: `gt_audios/`, `syn_audios/`, `manifest.json`, `results.json`.
 - Built-in metrics: STOI, PESQ-NB, PESQ-WB, mel loss, spectral convergence, SDR, SI-SDR.
@@ -70,6 +71,25 @@ or override at runtime:
 ```bash
 moss-eval run --config configs/examples/moss_audio_tokenizer.yaml --nq 1..8
 ```
+
+
+
+## Multi-Node / Multi-GPU
+
+Reconstruction can be sharded across processes. With `torchrun`, each process
+automatically receives a rank and uses `cuda:${LOCAL_RANK}` when `--device cuda`
+is passed:
+
+```bash
+torchrun --nproc_per_node=8 -m moss_eval.cli run \
+  --config configs/examples/moss_audio_tokenizer.yaml \
+  --device cuda \
+  --distributed torchrun
+```
+
+For Slurm, use `--distributed slurm` or `--distributed auto`. See
+[`docs/distributed.md`](docs/distributed.md) for multi-node and manual sharding
+examples.
 
 ## Dataset JSONL
 

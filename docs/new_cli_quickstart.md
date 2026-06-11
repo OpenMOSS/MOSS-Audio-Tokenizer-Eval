@@ -62,3 +62,15 @@ moss-eval run --config configs/examples/moss_audio_tokenizer.yaml --nq 1..8
 重建音频、用于对齐评测的 reference 音频，以及模型采样率。
 
 详见 [adding_adapters.md](adding_adapters.md)。
+
+
+## 多机器多卡
+
+```bash
+torchrun --nproc_per_node=8 -m moss_eval.cli run \
+  --config configs/examples/moss_audio_tokenizer.yaml \
+  --device cuda \
+  --distributed torchrun
+```
+
+更多 Slurm 和手动分片示例见 [distributed.md](distributed.md)。
