@@ -1,0 +1,18 @@
+# Minimal CPU smoke test. This should run without downloading model weights.
+exp_root: examples/outputs
+设备说明: "The actual runtime option is `device`; this Chinese key is ignored."
+device: cpu
+
+datasets:
+  - name: tiny
+    jsonl: examples/tiny_dataset/demo.jsonl
+
+models:
+  - name: identity
+    adapter: identity
+    sample_rate: 16000
+    channels: 1
+
+metrics:
+  # PESQ is omitted here to keep the smoke test light; enable it in real runs.
+  enabled: [stoi, mel_loss, spectral_convergence, sdr, sisdr]

@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "moss-audio-eval"
+version = "0.1.0"
+description = "Objective reconstruction evaluation toolkit for audio tokenizers, codecs, VAEs, and vocoders."
+readme = "readme.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy",
+  "scipy",
+  "torch",
+  "torchaudio",
+  "transformers",
+  "huggingface-hub",
+  "soundfile",
+  "librosa",
+  "tqdm",
+  "PyYAML",
+  "pesq",
+  "pystoi",
+  "mir_eval",
+]
+
+[project.scripts]
+moss-eval = "moss_eval.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["moss_eval*"]

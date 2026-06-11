@@ -1,0 +1,18 @@
+-e .
+torch==2.7.0
+torchaudio==2.7.0
+transformers>=4.45
+huggingface-hub
+soundfile
+librosa
+numpy
+scipy
+tqdm
+PyYAML
+pesq
+pystoi
+mir_eval
+tensorboard
+tensorboardX
+orjson
+pandas

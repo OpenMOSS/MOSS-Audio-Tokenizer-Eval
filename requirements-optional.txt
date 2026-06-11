@@ -1,0 +1,6 @@
+# Optional metrics or legacy compatibility. Keep these out of the minimal path
+# if they conflict with a local CUDA/PyTorch stack.
+stopes
+s3prl
+nnAudio
+streamlit

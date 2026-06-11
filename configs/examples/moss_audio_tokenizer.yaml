@@ -1,0 +1,27 @@
+# Example for the three official MOSS-Audio-Tokenizer family models.
+# Replace the dataset JSONL path with your own data.
+exp_root: exp
+device: cuda
+
+datasets:
+  - name: my_eval_set
+    jsonl: /path/to/eval.jsonl
+
+models:
+  - name: MOSS-Audio-Tokenizer
+    adapter: moss-audio-tokenizer
+    repo_id: OpenMOSS-Team/MOSS-Audio-Tokenizer
+    nq: all
+
+  - name: MOSS-Audio-Tokenizer-v2
+    adapter: moss-audio-tokenizer-v2
+    repo_id: OpenMOSS-Team/MOSS-Audio-Tokenizer-v2
+    nq: all
+
+  - name: MOSS-Audio-Tokenizer-Nano
+    adapter: moss-audio-tokenizer-nano
+    repo_id: OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano
+    nq: all
+
+metrics:
+  enabled: [stoi, pesq_nb, pesq_wb, mel_loss, spectral_convergence, sdr, sisdr]

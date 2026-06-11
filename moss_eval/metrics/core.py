@@ -1,0 +1,282 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+import json
+import logging
+from typing import Callable
+
+import numpy as np
+import torch
+import librosa
+from tqdm import tqdm
+
+from moss_eval import audio as audio_utils
+
+DEFAULT_METRICS = ["stoi", "pesq_nb", "pesq_wb", "mel_loss", "spectral_convergence", "sdr", "sisdr"]
+
+
+@dataclass
+class Pair:
+    name: str
+    ref_path: Path
+    syn_path: Path
+
+
+def collect_pairs(output_dir: str | Path) -> list[Pair]:
+    output_dir = Path(output_dir)
+    ref_dir = output_dir / "gt_audios"
+    syn_dir = output_dir / "syn_audios"
+    if not ref_dir.is_dir() or not syn_dir.is_dir():
+        raise FileNotFoundError(f"Expected {ref_dir} and {syn_dir}")
+    ref_files = {p.name: p for p in sorted(ref_dir.glob("*")) if p.is_file()}
+    syn_files = {p.name: p for p in sorted(syn_dir.glob("*")) if p.is_file()}
+    if ref_files.keys() != syn_files.keys():
+        missing_syn = sorted(ref_files.keys() - syn_files.keys())
+        missing_ref = sorted(syn_files.keys() - ref_files.keys())
+        raise ValueError(f"Mismatched audio files. missing_syn={missing_syn[:5]}, missing_ref={missing_ref[:5]}")
+    if not ref_files:
+        raise ValueError(f"No audio files found in {ref_dir}")
+    return [Pair(name, ref_files[name], syn_files[name]) for name in sorted(ref_files)]
+
+
+def _read_pair(pair: Pair, target_sr: int | None, device: str) -> tuple[np.ndarray, np.ndarray, int]:
+    ref, ref_sr = audio_utils.load_audio(pair.ref_path)
+    syn, syn_sr = audio_utils.load_audio(pair.syn_path)
+    if target_sr is None:
+        target_sr = ref_sr
+    ref = audio_utils.resample_audio(ref, ref_sr, target_sr, device=device)
+    syn = audio_utils.resample_audio(syn, syn_sr, target_sr, device=device)
+    ref_np = audio_utils.to_mono_numpy(ref)
+    syn_np = audio_utils.to_mono_numpy(syn)
+    length = min(ref_np.shape[-1], syn_np.shape[-1])
+    if length <= 0:
+        raise ValueError(f"Empty aligned audio for {pair.name}")
+    return ref_np[:length], syn_np[:length], int(target_sr)
+
+
+def _mean_or_raise(values: list[float], metric: str) -> float:
+    if not values:
+        raise RuntimeError(f"All files failed for metric {metric}")
+    return float(np.mean(np.nan_to_num(np.asarray(values, dtype=np.float64), nan=0.0, posinf=0.0, neginf=0.0)))
+
+
+def metric_stoi(pairs: list[Pair], device: str, target_sr: int = 16000) -> tuple[float, dict, list[str]]:
+    try:
+        from pystoi.stoi import stoi
+    except ImportError as exc:
+        raise RuntimeError("STOI requires `pystoi`. Install it or disable the stoi metric.") from exc
+    values, per_file, errors = [], {}, []
+    for pair in tqdm(pairs, desc="stoi"):
+        try:
+            ref, syn, sr = _read_pair(pair, target_sr, device)
+            value = float(stoi(ref, syn, sr, extended=False))
+            values.append(value)
+            per_file[pair.name] = value
+        except Exception as exc:
+            errors.append(f"{pair.name}: {exc}")
+    return _mean_or_raise(values, "stoi"), per_file, errors
+
+
+def _metric_pesq(pairs: list[Pair], device: str, mode: str) -> tuple[float, dict, list[str]]:
+    try:
+        from pesq import pesq
+    except ImportError as exc:
+        raise RuntimeError("PESQ requires `pesq`. Install it or disable pesq metrics.") from exc
+    target_sr = 8000 if mode == "nb" else 16000
+    key = f"pesq-{mode}"
+    values, per_file, errors = [], {}, []
+    for pair in tqdm(pairs, desc=key):
+        try:
+            ref, syn, sr = _read_pair(pair, target_sr, device)
+            value = float(pesq(sr, ref, syn, mode))
+            values.append(value)
+            per_file[pair.name] = value
+        except Exception as exc:
+            errors.append(f"{pair.name}: {exc}")
+    return _mean_or_raise(values, key), per_file, errors
+
+
+def metric_pesq_nb(pairs: list[Pair], device: str) -> tuple[float, dict, list[str]]:
+    return _metric_pesq(pairs, device, "nb")
+
+
+def metric_pesq_wb(pairs: list[Pair], device: str) -> tuple[float, dict, list[str]]:
+    return _metric_pesq(pairs, device, "wb")
+
+
+def metric_spectral_convergence(pairs: list[Pair], device: str, target_sr: int = 16000) -> tuple[float, dict, list[str]]:
+    values, per_file, errors = [], {}, []
+    for pair in tqdm(pairs, desc="spectral_convergence"):
+        try:
+            ref, syn, _ = _read_pair(pair, target_sr, device)
+            ref_mag = np.abs(librosa.stft(ref))
+            syn_mag = np.abs(librosa.stft(syn))
+            value = float(np.linalg.norm(ref_mag - syn_mag) / (np.linalg.norm(ref_mag) + 1e-12))
+            values.append(value)
+            per_file[pair.name] = value
+        except Exception as exc:
+            errors.append(f"{pair.name}: {exc}")
+    return _mean_or_raise(values, "spectral_convergence"), per_file, errors
+
+
+def _sisdr_value(ref: np.ndarray, syn: np.ndarray) -> float:
+    ref_zm = ref - np.mean(ref)
+    syn_zm = syn - np.mean(syn)
+    scale = np.dot(syn_zm, ref_zm) / (np.dot(ref_zm, ref_zm) + 1e-12)
+    target = scale * ref_zm
+    noise = syn_zm - target
+    return float(10 * np.log10((np.sum(target ** 2) + 1e-12) / (np.sum(noise ** 2) + 1e-12)))
+
+
+def metric_sisdr(pairs: list[Pair], device: str, target_sr: int = 16000) -> tuple[float, dict, list[str]]:
+    values, per_file, errors = [], {}, []
+    for pair in tqdm(pairs, desc="sisdr"):
+        try:
+            ref, syn, _ = _read_pair(pair, target_sr, device)
+            value = _sisdr_value(ref, syn)
+            values.append(value)
+            per_file[pair.name] = value
+        except Exception as exc:
+            errors.append(f"{pair.name}: {exc}")
+    return _mean_or_raise(values, "sisdr"), per_file, errors
+
+
+def _plain_sdr_value(ref: np.ndarray, syn: np.ndarray) -> float:
+    noise = ref - syn
+    return float(10 * np.log10((np.sum(ref ** 2) + 1e-12) / (np.sum(noise ** 2) + 1e-12)))
+
+
+def metric_sdr(pairs: list[Pair], device: str, target_sr: int = 16000) -> tuple[float, dict, list[str]]:
+    try:
+        from mir_eval.separation import bss_eval_sources
+    except ImportError:
+        bss_eval_sources = None
+        logging.warning("mir_eval is not installed; falling back to plain waveform SDR")
+    values, per_file, errors = [], {}, []
+    for pair in tqdm(pairs, desc="sdr"):
+        try:
+            ref, syn, _ = _read_pair(pair, target_sr, device)
+            if bss_eval_sources is None:
+                value = _plain_sdr_value(ref, syn)
+            else:
+                value = float(bss_eval_sources(np.asarray([ref]), np.asarray([syn]))[0][0])
+            values.append(value)
+            per_file[pair.name] = value
+        except Exception as exc:
+            errors.append(f"{pair.name}: {exc}")
+    return _mean_or_raise(values, "sdr"), per_file, errors
+
+
+def metric_mel_loss(pairs: list[Pair], device: str, target_sr: int = 16000) -> tuple[float, dict, list[str]]:
+    run_device = audio_utils.choose_device(device)
+    values, per_file, errors = [], {}, []
+    scales = [(2048, 150), (512, 80)]
+    for pair in tqdm(pairs, desc="mel_loss"):
+        try:
+            ref, syn, _ = _read_pair(pair, target_sr, run_device)
+            ref_t = torch.from_numpy(ref).float().to(run_device).unsqueeze(0)
+            syn_t = torch.from_numpy(syn).float().to(run_device).unsqueeze(0)
+            loss = torch.zeros((), device=run_device)
+            for n_fft, n_mels in scales:
+                hop = n_fft // 4
+                window = torch.hann_window(n_fft, device=run_device)
+                ref_stft = torch.stft(ref_t, n_fft=n_fft, hop_length=hop, window=window, return_complex=True)
+                syn_stft = torch.stft(syn_t, n_fft=n_fft, hop_length=hop, window=window, return_complex=True)
+                ref_mag = ref_stft.abs().clamp_min(1e-7)
+                syn_mag = syn_stft.abs().clamp_min(1e-7)
+                mel = librosa.filters.mel(sr=target_sr, n_fft=n_fft, n_mels=n_mels)
+                mel_t = torch.from_numpy(mel).float().to(run_device)
+                ref_mel = torch.matmul(mel_t, ref_mag.squeeze(0))
+                syn_mel = torch.matmul(mel_t, syn_mag.squeeze(0))
+                loss = loss + torch.nn.functional.l1_loss(ref_mel, syn_mel)
+                loss = loss + torch.nn.functional.l1_loss(ref_mel.log10(), syn_mel.log10())
+            value = float(loss.detach().cpu())
+            values.append(value)
+            per_file[pair.name] = value
+        except Exception as exc:
+            errors.append(f"{pair.name}: {exc}")
+    return _mean_or_raise(values, "mel_loss"), per_file, errors
+
+
+def metric_speaker_similarity(pairs: list[Pair], device: str, model_path: str | None = None) -> tuple[float, dict, list[str]]:
+    if not model_path:
+        raise RuntimeError("speaker_similarity requires `model_path` in metric config")
+    from stopes.eval.vocal_style_similarity.vocal_style_sim_tool import get_embedder, compute_cosine_similarity
+
+    ref_paths = [str(p.ref_path) for p in pairs]
+    syn_paths = [str(p.syn_path) for p in pairs]
+    embedder = get_embedder(model_name="valle", model_path=model_path)
+    sims = compute_cosine_similarity(embedder(ref_paths), embedder(syn_paths))
+    per_file = {pair.name: float(value) for pair, value in zip(pairs, sims)}
+    return float(np.mean(sims)), per_file, []
+
+
+METRIC_FUNCS: dict[str, Callable] = {
+    "stoi": metric_stoi,
+    "pesq_nb": metric_pesq_nb,
+    "pesq-nb": metric_pesq_nb,
+    "pesq_wb": metric_pesq_wb,
+    "pesq-wb": metric_pesq_wb,
+    "mel_loss": metric_mel_loss,
+    "spectral_convergence": metric_spectral_convergence,
+    "sdr": metric_sdr,
+    "sisdr": metric_sisdr,
+    "speaker_similarity": metric_speaker_similarity,
+    "sim": metric_speaker_similarity,
+}
+
+RESULT_KEY = {
+    "pesq_nb": "pesq-nb",
+    "pesq-nb": "pesq-nb",
+    "pesq_wb": "pesq-wb",
+    "pesq-wb": "pesq-wb",
+    "speaker_similarity": "sim",
+    "sim": "sim",
+}
+
+
+def evaluate_output_dir(output_dir: str | Path, metrics: list[str] | None = None, *, device: str = "cpu", metric_options: dict | None = None) -> tuple[dict, dict, dict]:
+    pairs = collect_pairs(output_dir)
+    metric_options = metric_options or {}
+    enabled = metrics or DEFAULT_METRICS
+    results: dict[str, float] = {}
+    per_file: dict[str, dict] = {}
+    errors: dict[str, list[str]] = {}
+    for metric in enabled:
+        metric = metric.strip()
+        if not metric:
+            continue
+        func = METRIC_FUNCS.get(metric)
+        if func is None:
+            raise ValueError(f"Unknown metric: {metric}. Available: {sorted(METRIC_FUNCS)}")
+        key = RESULT_KEY.get(metric, metric)
+        options = dict(metric_options.get(metric, {}))
+        logging.info("Evaluating metric=%s output_dir=%s", key, output_dir)
+        mean_value, metric_per_file, metric_errors = func(pairs, device=device, **options)
+        results[key] = mean_value
+        per_file[key] = metric_per_file
+        if metric_errors:
+            errors[key] = metric_errors
+            logging.warning("Metric %s had %d file errors", key, len(metric_errors))
+    return results, per_file, errors
+
+
+def write_results(output_dir: str | Path, results: dict, *, metric_errors: dict | None = None, metadata: dict | None = None) -> Path:
+    output_dir = Path(output_dir)
+    dataset_name = output_dir.name
+    result_path = output_dir.parent / "results.json"
+    if result_path.is_file():
+        with result_path.open("r", encoding="utf-8") as f:
+            all_results = json.load(f)
+    else:
+        all_results = {}
+    all_results.setdefault(dataset_name, {})
+    all_results[dataset_name].update({k: float(v) for k, v in results.items()})
+    if metric_errors:
+        all_results[dataset_name].setdefault("_metric_errors", {}).update(metric_errors)
+    if metadata:
+        all_results.setdefault("_meta", {}).update(metadata)
+    with result_path.open("w", encoding="utf-8") as f:
+        json.dump(all_results, f, ensure_ascii=False, indent=2, sort_keys=True)
+    return result_path
