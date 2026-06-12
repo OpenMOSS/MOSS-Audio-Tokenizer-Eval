@@ -4,6 +4,9 @@ from dataclasses import dataclass
 from pathlib import Path
 import json
 import logging
+import os
+import shlex
+import subprocess
 import tempfile
 from typing import Callable
 
@@ -14,7 +17,12 @@ from tqdm import tqdm
 
 from moss_eval import audio as audio_utils
 
-DEFAULT_METRICS = ["stoi", "pesq_nb", "pesq_wb", "mel_loss", "spectral_convergence", "sdr", "sisdr"]
+DEFAULT_METRICS = ["stoi", "pesq_nb", "pesq_wb", "mel_loss", "spectral_convergence", "sdr", "sisdr", "stft"]
+DEFAULT_UTMOS_ENV_DIR = "/inspire/ssd/project/embodied-multimodality/public/kwchen/.conda/envs/moss-audio-eval"
+DEFAULT_UTMOS_WORK_DIR = "/inspire/hdd/project/embodied-multimodality/public/ytgong/UTMOS-demo"
+DEFAULT_DAC_ENV_DIR = "/inspire/ssd/project/embodied-multimodality/public/ytgong/conda_envs/codec_eval_dac"
+DEFAULT_DAC_WORK_DIR = "/inspire/hdd/project/embodied-multimodality/public/ytgong/codec_eval_based_on_dac"
+DEFAULT_EXTERNAL_SCRIPT = "do_reconstruct_evalation_given_dir.py"
 
 
 @dataclass
@@ -84,7 +92,7 @@ def _metric_pesq(pairs: list[Pair], device: str, mode: str) -> tuple[float, dict
         from pesq import pesq
     except ImportError as exc:
         raise RuntimeError("PESQ requires `pesq`. Install it or disable pesq metrics.") from exc
-    target_sr = 8000 if mode == "nb" else 16000
+    target_sr = 16000
     key = f"pesq-{mode}"
     values, per_file, errors = [], {}, []
     for pair in tqdm(pairs, desc=key):
@@ -122,12 +130,11 @@ def metric_spectral_convergence(pairs: list[Pair], device: str, target_sr: int =
 
 
 def _sisdr_value(ref: np.ndarray, syn: np.ndarray) -> float:
-    ref_zm = ref - np.mean(ref)
-    syn_zm = syn - np.mean(syn)
-    scale = np.dot(syn_zm, ref_zm) / (np.dot(ref_zm, ref_zm) + 1e-12)
-    target = scale * ref_zm
-    noise = syn_zm - target
-    return float(10 * np.log10((np.sum(target ** 2) + 1e-12) / (np.sum(noise ** 2) + 1e-12)))
+    ref = ref / (np.linalg.norm(ref) + 1e-10)
+    syn = syn / (np.linalg.norm(syn) + 1e-10)
+    projection = np.dot(ref, syn) * ref
+    distortion = syn - projection
+    return float(10 * np.log10(np.mean(ref ** 2) / (np.mean(distortion ** 2) + 1e-10)))
 
 
 def metric_sisdr(pairs: list[Pair], device: str, target_sr: int = 16000) -> tuple[float, dict, list[str]]:
@@ -172,26 +179,63 @@ def metric_sdr(pairs: list[Pair], device: str, target_sr: int = 16000) -> tuple[
 def metric_mel_loss(pairs: list[Pair], device: str, target_sr: int = 16000) -> tuple[float, dict, list[str]]:
     run_device = audio_utils.choose_device(device)
     values, per_file, errors = [], {}, []
-    scales = [(2048, 150), (512, 80)]
+    n_mels = [150, 80]
+    window_lengths = [2048, 512]
+    loss_fn = torch.nn.L1Loss()
+    clamp_eps = 1e-5
+    pow_value = 2.0
     for pair in tqdm(pairs, desc="mel_loss"):
         try:
             ref, syn, _ = _read_pair(pair, target_sr, run_device)
             ref_t = torch.from_numpy(ref).float().to(run_device).unsqueeze(0)
             syn_t = torch.from_numpy(syn).float().to(run_device).unsqueeze(0)
             loss = torch.zeros((), device=run_device)
-            for n_fft, n_mels in scales:
-                hop = n_fft // 4
-                window = torch.hann_window(n_fft, device=run_device)
-                ref_stft = torch.stft(ref_t, n_fft=n_fft, hop_length=hop, window=window, return_complex=True)
-                syn_stft = torch.stft(syn_t, n_fft=n_fft, hop_length=hop, window=window, return_complex=True)
-                ref_mag = ref_stft.abs().clamp_min(1e-7)
-                syn_mag = syn_stft.abs().clamp_min(1e-7)
-                mel = librosa.filters.mel(sr=target_sr, n_fft=n_fft, n_mels=n_mels)
+            for n_mel, window_length in zip(n_mels, window_lengths):
+                hop = window_length // 4
+                window = torch.sqrt(
+                    torch.hann_window(window_length, periodic=True, device=run_device)
+                )
+                ref_stft = torch.stft(
+                    ref_t,
+                    n_fft=window_length,
+                    hop_length=hop,
+                    window=window,
+                    return_complex=True,
+                    center=True,
+                )
+                syn_stft = torch.stft(
+                    syn_t,
+                    n_fft=window_length,
+                    hop_length=hop,
+                    window=window,
+                    return_complex=True,
+                    center=True,
+                )
+                ref_mag = ref_stft.abs()
+                syn_mag = syn_stft.abs()
+                mel = librosa.filters.mel(
+                    sr=target_sr,
+                    n_fft=window_length,
+                    n_mels=n_mel,
+                    fmin=0.0,
+                    fmax=target_sr / 2,
+                )
                 mel_t = torch.from_numpy(mel).float().to(run_device)
-                ref_mel = torch.matmul(mel_t, ref_mag.squeeze(0))
-                syn_mel = torch.matmul(mel_t, syn_mag.squeeze(0))
-                loss = loss + torch.nn.functional.l1_loss(ref_mel, syn_mel)
-                loss = loss + torch.nn.functional.l1_loss(ref_mel.log10(), syn_mel.log10())
+                ref_mel = (
+                    torch.matmul(ref_mag.transpose(1, 2), mel_t.T)
+                    .transpose(1, 2)
+                    .unsqueeze(1)
+                )
+                syn_mel = (
+                    torch.matmul(syn_mag.transpose(1, 2), mel_t.T)
+                    .transpose(1, 2)
+                    .unsqueeze(1)
+                )
+                loss = loss + loss_fn(
+                    ref_mel.clamp(clamp_eps).pow(pow_value).log10(),
+                    syn_mel.clamp(clamp_eps).pow(pow_value).log10(),
+                )
+                loss = loss + loss_fn(ref_mel, syn_mel)
             value = float(loss.detach().cpu())
             values.append(value)
             per_file[pair.name] = value
@@ -235,6 +279,243 @@ def metric_speaker_similarity(
         return float(np.mean(sims)), per_file, errors
 
 
+def _infer_dataset_output_dir(pairs: list[Pair]) -> Path:
+    ref_dirs = {pair.ref_path.parent for pair in pairs}
+    syn_dirs = {pair.syn_path.parent for pair in pairs}
+    if len(ref_dirs) != 1 or len(syn_dirs) != 1:
+        raise ValueError("External metrics require all pairs to come from one output_dir")
+    ref_dir = next(iter(ref_dirs))
+    syn_dir = next(iter(syn_dirs))
+    dataset_output_dir = ref_dir.parent
+    if ref_dir.name != "gt_audios" or syn_dir.name != "syn_audios" or syn_dir.parent != dataset_output_dir:
+        raise ValueError("External metrics expect output_dir/gt_audios and output_dir/syn_audios")
+    return dataset_output_dir.expanduser().resolve()
+
+
+def _resolve_python_bin(python_bin: str | None, env_dir: str | None) -> str:
+    if python_bin:
+        path = Path(python_bin).expanduser()
+        return str(path) if path.parts else python_bin
+    if env_dir:
+        candidate = Path(env_dir).expanduser() / "bin" / "python"
+        if candidate.is_file():
+            return str(candidate)
+    return "python"
+
+
+def _format_command(cmd: list[str]) -> str:
+    return " ".join(shlex.quote(part) for part in cmd)
+
+
+def _tail(text: str | None, limit: int = 4000) -> str:
+    if not text:
+        return ""
+    return text[-limit:]
+
+
+def _prepare_external_metric_audio(
+    pairs: list[Pair],
+    output_dir: Path,
+    *,
+    target_sr: int,
+    channels: int,
+    device: str,
+) -> None:
+    gt_dir = output_dir / "gt_audios"
+    syn_dir = output_dir / "syn_audios"
+    gt_dir.mkdir(parents=True, exist_ok=True)
+    syn_dir.mkdir(parents=True, exist_ok=True)
+    for pair in pairs:
+        for src_path, dst_dir in ((pair.ref_path, gt_dir), (pair.syn_path, syn_dir)):
+            wav, sr = audio_utils.load_audio(src_path)
+            wav = audio_utils.resample_audio(wav, sr, target_sr, device=device)
+            wav = audio_utils.ensure_channels(wav, channels)
+            audio_utils.save_audio(dst_dir / pair.name, wav, target_sr)
+
+
+def _run_external_dataset_metric(
+    pairs: list[Pair],
+    metric_key: str,
+    *,
+    device: str,
+    work_dir: str | None,
+    env_dir: str | None,
+    python_bin: str | None,
+    script: str,
+    script_args: dict[str, str | int | float | Path] | None = None,
+    extra_args: list[str] | None = None,
+    env_vars: dict[str, str] | None = None,
+    preprocess_sample_rate: int | None = None,
+    preprocess_channels: int | None = None,
+    timeout: float | None = None,
+) -> tuple[float, dict, list[str]]:
+    source_output_dir = _infer_dataset_output_dir(pairs)
+    dataset_name = source_output_dir.name
+
+    work_path = Path(work_dir or ".").expanduser().resolve()
+    if not work_path.is_dir():
+        raise FileNotFoundError(f"{metric_key} work_dir not found: {work_path}")
+
+    script_path = Path(script).expanduser()
+    if not script_path.is_absolute():
+        script_path = work_path / script_path
+    if not script_path.is_file():
+        raise FileNotFoundError(f"{metric_key} script not found: {script_path}")
+
+    tmp_ctx = None
+    try:
+        dataset_output_dir = source_output_dir
+        if preprocess_sample_rate is not None or preprocess_channels is not None:
+            target_sr = int(preprocess_sample_rate or 24000)
+            channels = int(preprocess_channels or 1)
+            tmp_ctx = tempfile.TemporaryDirectory(prefix=f"moss_eval_{metric_key}_")
+            dataset_output_dir = Path(tmp_ctx.name) / dataset_name
+            logging.info(
+                "Preparing external metric audio metric=%s sr=%s channels=%s -> %s",
+                metric_key,
+                target_sr,
+                channels,
+                dataset_output_dir,
+            )
+            _prepare_external_metric_audio(
+                pairs,
+                dataset_output_dir,
+                target_sr=target_sr,
+                channels=channels,
+                device=device,
+            )
+
+        result_path = dataset_output_dir.parent / "results.json"
+        cmd = [_resolve_python_bin(python_bin, env_dir), str(script_path), "--output_dir", str(dataset_output_dir)]
+        for key, value in (script_args or {}).items():
+            cmd.extend([f"--{key}", str(value)])
+        if extra_args:
+            cmd.extend(str(arg) for arg in extra_args)
+
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(work_path) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+        if env_vars:
+            env.update({str(key): str(value) for key, value in env_vars.items()})
+        logging.info("Running external metric %s: %s", metric_key, _format_command(cmd))
+        try:
+            completed = subprocess.run(
+                cmd,
+                cwd=str(work_path),
+                env=env,
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=timeout,
+            )
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(
+                f"External metric {metric_key} failed with exit code {exc.returncode}: {_format_command(cmd)}\n"
+                f"stdout tail:\n{_tail(exc.stdout)}\n"
+                f"stderr tail:\n{_tail(exc.stderr)}"
+            ) from exc
+        if completed.stdout:
+            logging.debug("%s stdout tail:\n%s", metric_key, _tail(completed.stdout))
+        if completed.stderr:
+            logging.debug("%s stderr tail:\n%s", metric_key, _tail(completed.stderr))
+
+        if not result_path.is_file():
+            raise RuntimeError(f"External metric {metric_key} did not create {result_path}")
+        with result_path.open("r", encoding="utf-8") as f:
+            payload = json.load(f)
+        if dataset_name not in payload or metric_key not in payload[dataset_name]:
+            raise RuntimeError(f"External metric {metric_key} missing from {result_path} under dataset {dataset_name}")
+        return float(payload[dataset_name][metric_key]), {}, []
+    finally:
+        if tmp_ctx is not None:
+            tmp_ctx.cleanup()
+
+
+def _external_preprocess_options(
+    preprocess_sample_rate: int | None,
+    preprocess_channels: int | None,
+) -> tuple[int | None, int | None]:
+    if preprocess_sample_rate is False or preprocess_channels is False:
+        return None, None
+    return preprocess_sample_rate, preprocess_channels
+
+
+def metric_utmos(
+    pairs: list[Pair],
+    device: str,
+    python_bin: str | None = None,
+    env_dir: str | None = None,
+    conda_env: str | None = None,
+    work_dir: str | None = DEFAULT_UTMOS_WORK_DIR,
+    script: str = DEFAULT_EXTERNAL_SCRIPT,
+    ckpt_path: str | None = None,
+    bs: int | None = None,
+    num_workers: int | None = None,
+    preprocess_sample_rate: int | None = 24000,
+    preprocess_channels: int | None = 1,
+    extra_args: list[str] | None = None,
+    timeout: float | None = None,
+) -> tuple[float, dict, list[str]]:
+    script_args: dict[str, str | int | float | Path] = {}
+    if ckpt_path is not None:
+        script_args["ckpt_path"] = ckpt_path
+    if bs is not None:
+        script_args["bs"] = bs
+    if num_workers is not None:
+        script_args["num_workers"] = num_workers
+    preprocess_sample_rate, preprocess_channels = _external_preprocess_options(
+        preprocess_sample_rate,
+        preprocess_channels,
+    )
+    return _run_external_dataset_metric(
+        pairs,
+        "utmos",
+        device=device,
+        work_dir=work_dir,
+        env_dir=env_dir or conda_env or DEFAULT_UTMOS_ENV_DIR,
+        python_bin=python_bin,
+        script=script,
+        script_args=script_args,
+        extra_args=extra_args,
+        env_vars={"TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD": "1"},
+        preprocess_sample_rate=preprocess_sample_rate,
+        preprocess_channels=preprocess_channels,
+        timeout=timeout,
+    )
+
+
+def metric_stft(
+    pairs: list[Pair],
+    device: str,
+    python_bin: str | None = None,
+    env_dir: str | None = None,
+    conda_env: str | None = None,
+    work_dir: str | None = DEFAULT_DAC_WORK_DIR,
+    script: str = DEFAULT_EXTERNAL_SCRIPT,
+    preprocess_sample_rate: int | None = 24000,
+    preprocess_channels: int | None = 1,
+    extra_args: list[str] | None = None,
+    timeout: float | None = None,
+) -> tuple[float, dict, list[str]]:
+    preprocess_sample_rate, preprocess_channels = _external_preprocess_options(
+        preprocess_sample_rate,
+        preprocess_channels,
+    )
+    return _run_external_dataset_metric(
+        pairs,
+        "stft",
+        device=device,
+        work_dir=work_dir,
+        env_dir=env_dir or conda_env or DEFAULT_DAC_ENV_DIR,
+        python_bin=python_bin,
+        script=script,
+        extra_args=extra_args,
+        preprocess_sample_rate=preprocess_sample_rate,
+        preprocess_channels=preprocess_channels,
+        timeout=timeout,
+    )
+
+
 METRIC_FUNCS: dict[str, Callable] = {
     "stoi": metric_stoi,
     "pesq_nb": metric_pesq_nb,
@@ -247,6 +528,8 @@ METRIC_FUNCS: dict[str, Callable] = {
     "sisdr": metric_sisdr,
     "speaker_similarity": metric_speaker_similarity,
     "sim": metric_speaker_similarity,
+    "utmos": metric_utmos,
+    "stft": metric_stft,
 }
 
 RESULT_KEY = {

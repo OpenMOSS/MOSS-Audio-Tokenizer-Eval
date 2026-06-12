@@ -7,7 +7,7 @@ from collections import defaultdict
 
 DEFAULT_METRICS = [
     "sim", "stoi", "pesq-nb", "pesq-wb", "mel_loss", "spectral_convergence",
-    "sdr", "sisdr", "utmos", "stft", "visqol_speech", "visqol_audio",
+    "sdr", "sisdr", "utmos", "stft",
 ]
 
 

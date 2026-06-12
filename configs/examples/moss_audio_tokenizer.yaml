@@ -24,7 +24,7 @@ models:
     nq: all
 
 metrics:
-  enabled: [stoi, pesq_nb, pesq_wb, mel_loss, spectral_convergence, sdr, sisdr]
+  enabled: [stoi, pesq_nb, pesq_wb, mel_loss, spectral_convergence, sdr, sisdr, stft]
   # To enable speaker similarity:
   #   1. Download wavlm_large_finetune.pth from:
   #      https://drive.google.com/file/d/1-aE1NfzpRCLxA4GUxX9ITI3F9LlbtEGP/view
@@ -33,3 +33,12 @@ metrics:
   #   sim:
   #     model_path: pretrained_models/sim/wavlm_large_finetune.pth
   #     target_sr: 16000
+  # To enable utmos, download epoch=3-step=7459.ckpt and wav2vec_small.pt from:
+  #   https://huggingface.co/spaces/sarulab-speech/UTMOS-demo/tree/bc80791f9e8d1bba44bf0319895e9edee078c6e9
+  # Add `utmos` to `enabled`, then override paths if running on another machine:
+  # options:
+  #   utmos:
+  #     python_bin: /inspire/ssd/project/embodied-multimodality/public/kwchen/.conda/envs/moss-audio-eval/bin/python
+  #     work_dir: /inspire/hdd/project/embodied-multimodality/public/ytgong/UTMOS-demo
+  #     preprocess_sample_rate: 24000
+  #     preprocess_channels: 1
