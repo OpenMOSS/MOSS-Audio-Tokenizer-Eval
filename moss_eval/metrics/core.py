@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import json
 import logging
+import tempfile
 from typing import Callable
 
 import numpy as np
@@ -199,17 +200,39 @@ def metric_mel_loss(pairs: list[Pair], device: str, target_sr: int = 16000) -> t
     return _mean_or_raise(values, "mel_loss"), per_file, errors
 
 
-def metric_speaker_similarity(pairs: list[Pair], device: str, model_path: str | None = None) -> tuple[float, dict, list[str]]:
+def metric_speaker_similarity(
+    pairs: list[Pair],
+    device: str,
+    model_path: str | None = None,
+    target_sr: int = 16000,
+) -> tuple[float, dict, list[str]]:
     if not model_path:
         raise RuntimeError("speaker_similarity requires `model_path` in metric config")
     from stopes.eval.vocal_style_similarity.vocal_style_sim_tool import get_embedder, compute_cosine_similarity
 
-    ref_paths = [str(p.ref_path) for p in pairs]
-    syn_paths = [str(p.syn_path) for p in pairs]
-    embedder = get_embedder(model_name="valle", model_path=model_path)
-    sims = compute_cosine_similarity(embedder(ref_paths), embedder(syn_paths))
-    per_file = {pair.name: float(value) for pair, value in zip(pairs, sims)}
-    return float(np.mean(sims)), per_file, []
+    names, ref_paths, syn_paths, errors = [], [], [], []
+    with tempfile.TemporaryDirectory(prefix="moss_eval_sim_") as tmp_dir:
+        tmp_dir_path = Path(tmp_dir)
+        for idx, pair in enumerate(pairs):
+            try:
+                ref, syn, sr = _read_pair(pair, target_sr, device)
+                ref_path = tmp_dir_path / f"{idx:08d}_ref.wav"
+                syn_path = tmp_dir_path / f"{idx:08d}_syn.wav"
+                audio_utils.save_audio(ref_path, torch.from_numpy(ref).unsqueeze(0), sr)
+                audio_utils.save_audio(syn_path, torch.from_numpy(syn).unsqueeze(0), sr)
+                names.append(pair.name)
+                ref_paths.append(str(ref_path))
+                syn_paths.append(str(syn_path))
+            except Exception as exc:
+                errors.append(f"{pair.name}: {exc}")
+
+        if not ref_paths:
+            raise RuntimeError("All files failed for metric sim")
+
+        embedder = get_embedder(model_name="valle", model_path=model_path)
+        sims = compute_cosine_similarity(embedder(ref_paths), embedder(syn_paths))
+        per_file = {name: float(value) for name, value in zip(names, sims)}
+        return float(np.mean(sims)), per_file, errors
 
 
 METRIC_FUNCS: dict[str, Callable] = {

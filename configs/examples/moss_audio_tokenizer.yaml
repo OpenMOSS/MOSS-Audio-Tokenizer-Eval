@@ -25,3 +25,11 @@ models:
 
 metrics:
   enabled: [stoi, pesq_nb, pesq_wb, mel_loss, spectral_convergence, sdr, sisdr]
+  # To enable speaker similarity:
+  #   1. Download wavlm_large_finetune.pth from:
+  #      https://drive.google.com/file/d/1-aE1NfzpRCLxA4GUxX9ITI3F9LlbtEGP/view
+  #   2. Add `sim` to `enabled` and set:
+  # options:
+  #   sim:
+  #     model_path: pretrained_models/sim/wavlm_large_finetune.pth
+  #     target_sr: 16000

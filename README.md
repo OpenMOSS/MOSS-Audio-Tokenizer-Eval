@@ -20,6 +20,7 @@ CLI. Legacy or system-dependent metrics can still be added as optional adapters.
 - Extensible adapter interface for other tokenizers, codecs, VAEs, and vocoders.
 - Stable output contract: `gt_audios/`, `syn_audios/`, `manifest.json`, `results.json`.
 - Built-in metrics: STOI, PESQ-NB, PESQ-WB, mel loss, spectral convergence, SDR, SI-SDR.
+- Optional speaker similarity metric: `sim`.
 - Manifest-based skip logic to avoid accidentally reusing stale reconstructions.
 
 ## Installation
@@ -73,6 +74,32 @@ or override at runtime:
 ```bash
 moss-eval run --config configs/examples/moss_audio_tokenizer.yaml --nq 1..8
 ```
+
+## Speaker Similarity (`sim`)
+
+`sim` uses the `wavlm_large_finetune.pth` checkpoint. Download this file
+manually before running `sim`:
+
+```text
+https://drive.google.com/file/d/1-aE1NfzpRCLxA4GUxX9ITI3F9LlbtEGP/view
+
+filename: wavlm_large_finetune.pth
+sha256: 51f07e3b94d9e0262a6a675ef5a087be3dd09e8c62e9d886827f44f82fe7f94b
+```
+
+Enable `sim` in the config:
+
+```yaml
+metrics:
+  enabled: [stoi, pesq_nb, pesq_wb, mel_loss, spectral_convergence, sdr, sisdr, sim]
+  options:
+    sim:
+      model_path: pretrained_models/sim/wavlm_large_finetune.pth
+      target_sr: 16000
+```
+
+For offline evaluation, copy the checkpoint to the offline machine first and set
+`model_path` to that local file.
 
 
 
