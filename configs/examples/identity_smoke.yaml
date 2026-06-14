@@ -1,6 +1,5 @@
 # Minimal CPU smoke test. This should run without downloading model weights.
 exp_root: examples/outputs
-设备说明: "The actual runtime option is `device`; this Chinese key is ignored."
 device: cpu
 
 datasets:

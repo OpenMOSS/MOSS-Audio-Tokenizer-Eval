@@ -216,14 +216,12 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-# Streamlit
-.streamlit/secrets.toml
-
 # MOSS-Audio-Tokenizer-Eval outputs
 exp/
 csv_results/
 examples/outputs/
 examples/csv_results/
+examples/csv_results*/
 *.log
 
 # Model/data caches

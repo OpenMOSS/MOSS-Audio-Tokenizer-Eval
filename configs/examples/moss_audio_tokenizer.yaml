@@ -35,10 +35,10 @@ metrics:
   #     target_sr: 16000
   # To enable utmos, download epoch=3-step=7459.ckpt and wav2vec_small.pt from:
   #   https://huggingface.co/spaces/sarulab-speech/UTMOS-demo/tree/bc80791f9e8d1bba44bf0319895e9edee078c6e9
-  # Add `utmos` to `enabled`, then override paths if running on another machine:
+  # Add `utmos` to `enabled`, then set local paths:
   # options:
   #   utmos:
-  #     python_bin: /inspire/ssd/project/embodied-multimodality/public/kwchen/.conda/envs/moss-audio-eval/bin/python
-  #     work_dir: /inspire/hdd/project/embodied-multimodality/public/ytgong/UTMOS-demo
+  #     work_dir: /path/to/UTMOS-demo
+  #     python_bin: /path/to/utmos/env/bin/python
   #     preprocess_sample_rate: 24000
   #     preprocess_channels: 1

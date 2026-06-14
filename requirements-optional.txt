@@ -1,6 +1,14 @@
-# Optional metrics or legacy compatibility. Keep these out of the minimal path
-# if they conflict with a local CUDA/PyTorch stack.
+# Optional dependencies for sim and utmos metrics.
 stopes
 s3prl
 nnAudio
-streamlit
+setuptools<81
+pytorch-lightning==1.9.5
+hydra-core==1.0.7
+omegaconf==2.0.6
+antlr4-python3-runtime==4.8
+Cython
+bitarray
+sacrebleu
+portalocker
+fairseq @ git+https://github.com/pytorch/fairseq.git@d03f4e771484a433f025f47744017c2eb6e9c6bc

@@ -4,15 +4,15 @@ channels:
   - defaults
 dependencies:
   - python=3.10
-  - "pip<24.1"
+  - pip
   - ffmpeg
   - libsndfile
   - pip:
       - -e .
       - torch==2.7.0
       - torchaudio==2.7.0
-      - transformers>=4.45
-      - huggingface-hub
+      - transformers==5.11.0
+      - huggingface-hub==1.19.0
       - soundfile
       - librosa
       - numpy
@@ -22,18 +22,4 @@ dependencies:
       - pesq
       - pystoi
       - mir_eval
-      - tensorboard
-      - tensorboardX
-      - orjson
-      - pandas
-      - setuptools<81
-      - pytorch-lightning==1.9.5
-      - hydra-core==1.0.7
-      - omegaconf==2.0.6
-      - antlr4-python3-runtime==4.8
-      - Cython
-      - bitarray
-      - sacrebleu
-      - portalocker
-      - debugpy
-      - fairseq @ git+https://github.com/pytorch/fairseq.git@d03f4e771484a433f025f47744017c2eb6e9c6bc
+      - pyarrow

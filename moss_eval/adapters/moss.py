@@ -134,6 +134,8 @@ class MossAudioTokenizerAdapter(AudioModelAdapter):
             "revision": self.revision,
             "sample_rate": self.sample_rate,
             "channels": self.channels,
+            "frame_rate": 12.5,
+            "codebook_bits": 10,
             "chunk_duration": self.chunk_duration,
         })
         return meta

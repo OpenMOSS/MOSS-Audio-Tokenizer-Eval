@@ -18,10 +18,6 @@ from tqdm import tqdm
 from moss_eval import audio as audio_utils
 
 DEFAULT_METRICS = ["stoi", "pesq_nb", "pesq_wb", "mel_loss", "spectral_convergence", "sdr", "sisdr", "stft"]
-DEFAULT_UTMOS_ENV_DIR = "/inspire/ssd/project/embodied-multimodality/public/kwchen/.conda/envs/moss-audio-eval"
-DEFAULT_UTMOS_WORK_DIR = "/inspire/hdd/project/embodied-multimodality/public/ytgong/UTMOS-demo"
-DEFAULT_DAC_ENV_DIR = "/inspire/ssd/project/embodied-multimodality/public/ytgong/conda_envs/codec_eval_dac"
-DEFAULT_DAC_WORK_DIR = "/inspire/hdd/project/embodied-multimodality/public/ytgong/codec_eval_based_on_dac"
 DEFAULT_EXTERNAL_SCRIPT = "do_reconstruct_evalation_given_dir.py"
 
 
@@ -446,7 +442,7 @@ def metric_utmos(
     python_bin: str | None = None,
     env_dir: str | None = None,
     conda_env: str | None = None,
-    work_dir: str | None = DEFAULT_UTMOS_WORK_DIR,
+    work_dir: str | None = None,
     script: str = DEFAULT_EXTERNAL_SCRIPT,
     ckpt_path: str | None = None,
     bs: int | None = None,
@@ -456,6 +452,8 @@ def metric_utmos(
     extra_args: list[str] | None = None,
     timeout: float | None = None,
 ) -> tuple[float, dict, list[str]]:
+    if not work_dir:
+        raise RuntimeError("utmos requires `work_dir` in metric options")
     script_args: dict[str, str | int | float | Path] = {}
     if ckpt_path is not None:
         script_args["ckpt_path"] = ckpt_path
@@ -472,7 +470,7 @@ def metric_utmos(
         "utmos",
         device=device,
         work_dir=work_dir,
-        env_dir=env_dir or conda_env or DEFAULT_UTMOS_ENV_DIR,
+        env_dir=env_dir or conda_env,
         python_bin=python_bin,
         script=script,
         script_args=script_args,
@@ -484,36 +482,72 @@ def metric_utmos(
     )
 
 
+def _multi_scale_stft_loss(
+    ref: np.ndarray,
+    syn: np.ndarray,
+    *,
+    device: str,
+    window_lengths: tuple[int, ...] = (2048, 512),
+    clamp_eps: float = 1e-5,
+    pow_value: float = 2.0,
+) -> float:
+    run_device = audio_utils.choose_device(device)
+    ref_t = torch.from_numpy(ref).float().to(run_device).unsqueeze(0)
+    syn_t = torch.from_numpy(syn).float().to(run_device).unsqueeze(0)
+    loss = torch.zeros((), device=run_device)
+    loss_fn = torch.nn.L1Loss()
+    for window_length in window_lengths:
+        hop_length = window_length // 4
+        # Match audiotools AudioSignal default: scipy periodic Hann, square-rooted.
+        window = torch.sqrt(torch.hann_window(window_length, periodic=True, device=run_device))
+        ref_stft = torch.stft(
+            ref_t,
+            n_fft=window_length,
+            hop_length=hop_length,
+            window=window,
+            return_complex=True,
+            center=True,
+        )
+        syn_stft = torch.stft(
+            syn_t,
+            n_fft=window_length,
+            hop_length=hop_length,
+            window=window,
+            return_complex=True,
+            center=True,
+        )
+        ref_mag = ref_stft.abs()
+        syn_mag = syn_stft.abs()
+        loss = loss + loss_fn(
+            ref_mag.clamp(clamp_eps).pow(pow_value).log10(),
+            syn_mag.clamp(clamp_eps).pow(pow_value).log10(),
+        )
+        loss = loss + loss_fn(ref_mag, syn_mag)
+    return float(loss.detach().cpu())
+
+
 def metric_stft(
     pairs: list[Pair],
     device: str,
-    python_bin: str | None = None,
-    env_dir: str | None = None,
-    conda_env: str | None = None,
-    work_dir: str | None = DEFAULT_DAC_WORK_DIR,
-    script: str = DEFAULT_EXTERNAL_SCRIPT,
-    preprocess_sample_rate: int | None = 24000,
-    preprocess_channels: int | None = 1,
-    extra_args: list[str] | None = None,
-    timeout: float | None = None,
+    target_sr: int = 16000,
+    window_lengths: list[int] | tuple[int, ...] = (2048, 512),
 ) -> tuple[float, dict, list[str]]:
-    preprocess_sample_rate, preprocess_channels = _external_preprocess_options(
-        preprocess_sample_rate,
-        preprocess_channels,
-    )
-    return _run_external_dataset_metric(
-        pairs,
-        "stft",
-        device=device,
-        work_dir=work_dir,
-        env_dir=env_dir or conda_env or DEFAULT_DAC_ENV_DIR,
-        python_bin=python_bin,
-        script=script,
-        extra_args=extra_args,
-        preprocess_sample_rate=preprocess_sample_rate,
-        preprocess_channels=preprocess_channels,
-        timeout=timeout,
-    )
+    values, per_file, errors = [], {}, []
+    window_lengths_tuple = tuple(int(w) for w in window_lengths)
+    for pair in tqdm(pairs, desc="stft"):
+        try:
+            ref, syn, _ = _read_pair(pair, target_sr, device)
+            value = _multi_scale_stft_loss(
+                ref,
+                syn,
+                device=device,
+                window_lengths=window_lengths_tuple,
+            )
+            values.append(value)
+            per_file[pair.name] = value
+        except Exception as exc:
+            errors.append(f"{pair.name}: {exc}")
+    return _mean_or_raise(values, "stft"), per_file, errors
 
 
 METRIC_FUNCS: dict[str, Callable] = {
@@ -568,6 +602,35 @@ def evaluate_output_dir(output_dir: str | Path, metrics: list[str] | None = None
     return results, per_file, errors
 
 
+def _infer_bps_from_manifest(output_dir: Path) -> int | None:
+    manifest_path = output_dir / "manifest.json"
+    if not manifest_path.is_file():
+        return None
+    with manifest_path.open("r", encoding="utf-8") as f:
+        manifest = json.load(f)
+
+    model = manifest.get("model") or {}
+    nq = manifest.get("nq")
+    if nq is None:
+        return None
+
+    if model.get("bps") is not None:
+        return int(round(float(model["bps"])))
+    if model.get("bps_per_quantizer") is not None:
+        return int(round(float(model["bps_per_quantizer"]) * int(nq)))
+
+    frame_rate = model.get("frame_rate")
+    codebook_bits = model.get("codebook_bits")
+    if frame_rate is not None and codebook_bits is not None:
+        return int(round(float(frame_rate) * float(codebook_bits) * int(nq)))
+
+    repo_id = str(model.get("repo_id") or "")
+    adapter = str(model.get("adapter") or "")
+    if adapter == "moss_audio_tokenizer" or "MOSS-Audio-Tokenizer" in repo_id:
+        return int(round(12.5 * 10 * int(nq)))
+    return None
+
+
 def write_results(output_dir: str | Path, results: dict, *, metric_errors: dict | None = None, metadata: dict | None = None) -> Path:
     output_dir = Path(output_dir)
     dataset_name = output_dir.name
@@ -581,6 +644,9 @@ def write_results(output_dir: str | Path, results: dict, *, metric_errors: dict 
     all_results[dataset_name].update({k: float(v) for k, v in results.items()})
     if metric_errors:
         all_results[dataset_name].setdefault("_metric_errors", {}).update(metric_errors)
+    inferred_bps = _infer_bps_from_manifest(output_dir)
+    if inferred_bps is not None:
+        all_results.setdefault("_meta", {})["bps"] = inferred_bps
     if metadata:
         all_results.setdefault("_meta", {}).update(metadata)
     with result_path.open("w", encoding="utf-8") as f:

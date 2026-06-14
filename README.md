@@ -7,8 +7,8 @@ audio VAEs, and vocoders.
 
 The default path is a single Conda/Python environment: model reconstruction,
 common objective metrics, result manifests, and CSV summaries all run through one
-CLI. Metrics that need extra environments or weights can be configured with
-explicit local paths.
+CLI. Metrics that need extra dependencies or weights can be configured with
+explicit paths.
 
 ## Features
 
@@ -31,15 +31,22 @@ conda env create -f environment.yml
 conda activate moss-audio-eval
 ```
 
-This installs the reconstruction code, default metrics, and `utmos`
-dependencies in one environment.
+This installs model reconstruction, data preparation, default metrics, and
+result summarization dependencies.
 
-If you already have a compatible PyTorch environment, install the same pip
-dependencies directly. UTMOS requires `omegaconf==2.0.6`, so direct pip installs
-need `pip<24.1` first:
+If you want visible pip download progress during installation, use the
+equivalent split commands:
 
 ```bash
-python -m pip install "pip<24.1"
+conda create -n moss-audio-eval python=3.10 pip ffmpeg libsndfile -c conda-forge
+conda activate moss-audio-eval
+pip install -r requirements-eval.txt
+```
+
+If you already have a compatible PyTorch environment, install the same pip
+dependencies directly:
+
+```bash
 pip install -r requirements-eval.txt
 ```
 
@@ -60,24 +67,92 @@ Equivalent without installing the package entrypoint:
 python -m moss_eval.cli run --config configs/examples/identity_smoke.yaml --force
 ```
 
+## Prepare LibriSpeech test-clean
+
+Use the Hugging Face dataset below for a public, reproducible test-clean set:
+
+```text
+https://huggingface.co/datasets/AudioLLMs/librispeech_test_clean
+```
+
+The dataset stores WAV bytes in parquet `context.bytes` fields, so the parquet
+files cannot be used directly as evaluation JSONL. This repository provides:
+
+```text
+scripts/prepare_hf_librispeech_test_clean.py
+```
+
+The script downloads or reads parquet files, extracts WAV files to
+`extracted_wav/`, and writes JSONL files accepted by this evaluator.
+
+Download and prepare on a networked machine:
+
+```bash
+python scripts/prepare_hf_librispeech_test_clean.py \
+  --output-dir data/librispeech_test_clean_hf
+```
+
+The JSONL for normal evaluation is:
+
+```text
+data/librispeech_test_clean_hf/z-librispeech_test_clean_hf_order.jsonl
+```
+
+If automatic download is unstable, download these parquet files manually and
+copy them to the evaluation machine:
+
+```text
+https://huggingface.co/datasets/AudioLLMs/librispeech_test_clean/resolve/main/data/test-00000-of-00002.parquet
+https://huggingface.co/datasets/AudioLLMs/librispeech_test_clean/resolve/main/data/test-00001-of-00002.parquet
+```
+
+Then extract audio and JSONL without network access:
+
+```bash
+python scripts/prepare_hf_librispeech_test_clean.py \
+  --local-parquet-dir /path/to/librispeech_test_clean/data \
+  --output-dir data/librispeech_test_clean_hf
+```
+
+Important outputs:
+
+- `extracted_wav/`: extracted WAV files.
+- `z-librispeech_test_clean_hf_order.jsonl`: evaluation JSONL.
+- `prepare_summary.json` and `prepare_report.md`: counts and output paths.
+
+Use the generated JSONL in the config:
+
+```yaml
+datasets:
+  - name: librispeech_test_clean_hf
+    jsonl: /abs/path/to/data/librispeech_test_clean_hf/z-librispeech_test_clean_hf_order.jsonl
+```
+
+Then validate and run evaluation:
+
+```bash
+moss-eval validate --config configs/examples/moss_audio_tokenizer.yaml
+moss-eval run --config configs/examples/moss_audio_tokenizer.yaml --device cuda
+```
+
 ## Metrics
 
 The toolkit supports the following reconstruction metrics. The example config
 enables metrics that do not need extra model weights; `sim` and `utmos` require
 additional checkpoints.
 
-| Metric | Evaluation setting | Extra file or environment |
+| Metric | Evaluation setting | Extra requirement |
 |---|---|---|
-| `stoi` | 16 kHz / mono, matched filenames | None |
+| `stoi` | 16 kHz / mono, same filenames | None |
 | `pesq-nb` | Resample to 16 kHz, PESQ NB mode | None |
 | `pesq-wb` | 16 kHz | None |
 | `mel_loss` | `[2048, 512]` windows, `[150, 80]` mel bins, sqrt-Hann, magnitude L1 + log L1 | None |
 | `spectral_convergence` | Multi-resolution spectral convergence | None |
 | `sdr` | `mir_eval.separation.bss_eval_sources` first | None |
 | `sisdr` | L2-normalize, then projection/distortion formula | None |
-| `stft` | STFT distance | None |
+| `stft` | 16 kHz / mono, two-scale `[2048, 512]` sqrt-Hann STFT loss | None |
 | `sim` | 16 kHz / mono speaker similarity | `wavlm_large_finetune.pth` |
-| `utmos` | External UTMOS script, temporary `24 kHz / mono` inputs | UTMOS environment, `epoch=3-step=7459.ckpt`, `wav2vec_small.pt` |
+| `utmos` | External UTMOS script, temporary `24 kHz / mono` inputs | Install `requirements-optional.txt`; prepare `epoch=3-step=7459.ckpt`, `wav2vec_small.pt` |
 
 ## Evaluate MOSS-Audio-Tokenizer
 
@@ -137,31 +212,23 @@ For offline evaluation, copy the checkpoint to the offline machine first and set
 
 ## `utmos`
 
-`utmos` needs extra checkpoints and should be added to `metrics.enabled` when
-those files are ready. It calls an external metric project:
+Add `utmos` to `metrics.enabled` when needed. Install optional dependencies
+before running it:
+
+```bash
+pip install -r requirements-optional.txt
+```
+
+The metric calls the external script in `work_dir`:
 
 ```bash
 python do_reconstruct_evalation_given_dir.py --output_dir <dataset_output_dir>
 ```
 
-Before calling the external script, this project prepares a temporary
-`24 kHz / mono` `gt_audios` and `syn_audios` directory. The original
-reconstructed audio files are not modified.
-
-Default paths use the current project environment:
-
-```text
-utmos python: /inspire/ssd/project/embodied-multimodality/public/kwchen/.conda/envs/moss-audio-eval/bin/python
-utmos work_dir: /inspire/hdd/project/embodied-multimodality/public/ytgong/UTMOS-demo
-```
-
-UTMOS dependencies are already included in the default `environment.yml` and
-`requirements-eval.txt`; no separate UTMOS requirements file is needed.
-
-This dependency set was verified by loading the UTMOS checkpoint and scoring a
-short waveform. The CLI automatically sets `TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1`
-for `utmos`, which is needed by PyTorch 2.6+ checkpoint loading. If you run the
-UTMOS scripts manually, export that variable yourself.
+Before calling the external script, this project prepares temporary
+`24 kHz / mono` `gt_audios` and `syn_audios` directories. The original
+reconstructed audio files are not modified. The CLI automatically sets
+`TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1` for PyTorch 2.6+ checkpoint loading.
 
 `utmos` needs two checkpoint files:
 
@@ -171,14 +238,18 @@ https://huggingface.co/spaces/sarulab-speech/UTMOS-demo/resolve/bc80791f9e8d1bba
 ```
 
 Put both files in the UTMOS work directory root. Another/offline machine must
-also have the metric wrapper script and a working `utmos` Python/Conda
-environment.
+also have the metric wrapper script and a Python environment with
+`requirements-optional.txt` installed.
 
 Enable them in config:
 
 ```yaml
 metrics:
   enabled: [stoi, pesq_nb, pesq_wb, mel_loss, spectral_convergence, sdr, sisdr, stft, utmos]
+  options:
+    utmos:
+      work_dir: /path/to/UTMOS-demo
+      python_bin: /path/to/python
 ```
 
 ## Metric Run Examples
