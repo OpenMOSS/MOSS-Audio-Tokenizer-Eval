@@ -26,6 +26,8 @@ explicit paths.
 
 ## Installation
 
+Create the default evaluation environment:
+
 ```bash
 conda env create -f environment.yml
 conda activate moss-audio-eval
@@ -34,8 +36,27 @@ conda activate moss-audio-eval
 This installs model reconstruction, data preparation, default metrics, and
 result summarization dependencies.
 
+To use `sim` or `utmos`, install optional dependencies in the same environment:
+
+```bash
+conda install -y pip=24.0 setuptools wheel tensorboardx orjson debugpy -c conda-forge
+
+pip install "Cython<3"
+
+env -u CUDA_HOME pip install \
+  --no-build-isolation \
+  --use-deprecated=legacy-resolver \
+  -r requirements-optional.txt
+```
+
+`pip=24.0` keeps compatibility with the dependency metadata used by
+`omegaconf==2.0.6`. `env -u CUDA_HOME` prevents `fairseq` from building obsolete
+CUDA extensions in newer PyTorch/CUDA environments. `requirements-optional.txt`
+installs Python packages for `sim` and `utmos`; their checkpoint files must still
+be downloaded separately as described below.
+
 If you want visible pip download progress during installation, use the
-equivalent split commands:
+equivalent split commands for the default dependencies:
 
 ```bash
 conda create -n moss-audio-eval python=3.10 pip ffmpeg libsndfile -c conda-forge
@@ -43,12 +64,7 @@ conda activate moss-audio-eval
 pip install -r requirements-eval.txt
 ```
 
-If you already have a compatible PyTorch environment, install the same pip
-dependencies directly:
-
-```bash
-pip install -r requirements-eval.txt
-```
+Then run the optional dependency commands above if `sim` or `utmos` is needed.
 
 ## Smoke Test
 
@@ -151,7 +167,7 @@ additional checkpoints.
 | `sdr` | `mir_eval.separation.bss_eval_sources` first | None |
 | `sisdr` | L2-normalize, then projection/distortion formula | None |
 | `stft` | 16 kHz / mono, two-scale `[2048, 512]` sqrt-Hann STFT loss | None |
-| `sim` | 16 kHz / mono speaker similarity | `wavlm_large_finetune.pth` |
+| `sim` | 16 kHz / mono speaker similarity | Install `requirements-optional.txt`; prepare `wavlm_large_finetune.pth` |
 | `utmos` | External UTMOS script, temporary `24 kHz / mono` inputs | Install `requirements-optional.txt`; prepare `epoch=3-step=7459.ckpt`, `wav2vec_small.pt` |
 
 ## Evaluate MOSS-Audio-Tokenizer
@@ -212,12 +228,8 @@ For offline evaluation, copy the checkpoint to the offline machine first and set
 
 ## `utmos`
 
-Add `utmos` to `metrics.enabled` when needed. Install optional dependencies
-before running it:
-
-```bash
-pip install -r requirements-optional.txt
-```
+Add `utmos` to `metrics.enabled` when needed. Install optional dependencies as
+shown in `Installation`.
 
 The metric calls the external script in `work_dir`:
 
@@ -334,3 +346,7 @@ The adapter receives raw waveform `[C, T]` and sample rate, then returns the
 reconstructed audio and the reference audio used for metric alignment.
 
 See [`docs/adding_adapters.md`](docs/adding_adapters.md).
+
+## License
+
+This project is released under the Apache License 2.0. See [LICENSE](LICENSE).
