@@ -126,11 +126,16 @@ def metric_spectral_convergence(pairs: list[Pair], device: str, target_sr: int =
 
 
 def _sisdr_value(ref: np.ndarray, syn: np.ndarray) -> float:
+    # SI-SDR (Le Roux et al., 2019): energy of the target component (the
+    # projection of `syn` onto `ref`) over the energy of the residual.
     ref = ref / (np.linalg.norm(ref) + 1e-10)
     syn = syn / (np.linalg.norm(syn) + 1e-10)
     projection = np.dot(ref, syn) * ref
     distortion = syn - projection
-    return float(10 * np.log10(np.mean(ref ** 2) / (np.mean(distortion ** 2) + 1e-10)))
+    # Both signals have unit norm, so the energies are summed (not averaged):
+    # this keeps the 1e-10 guards negligible relative to the signal energy
+    # regardless of clip length.
+    return float(10 * np.log10((np.sum(projection ** 2) + 1e-10) / (np.sum(distortion ** 2) + 1e-10)))
 
 
 def metric_sisdr(pairs: list[Pair], device: str, target_sr: int = 16000) -> tuple[float, dict, list[str]]:
